@@ -92,7 +92,9 @@ class NuScenesMonoDataset(CocoDataset):
                  proposal_file=None,
                  test_mode=False,
                  filter_empty_gt=True,
-                 file_client_args=dict(backend='disk')):
+                 file_client_args=dict(backend='disk'),
+                 only_tokens=(),
+        ):
         self.ann_file = ann_file
         self.data_root = data_root
         self.img_prefix = img_prefix
@@ -113,6 +115,13 @@ class NuScenesMonoDataset(CocoDataset):
                 self.proposals = self.load_proposals(local_path)
         else:
             self.proposals = None
+
+        # filter scenes
+        if len(only_tokens) > 0:
+            valid_inds = [i for i in range(len(self.data_infos)) if self.data_infos[i]["token"] in only_tokens]
+            self.data_infos = [self.data_infos[i] for i in valid_inds]
+            if self.proposals is not None:
+                self.proposals = [self.proposals[i] for i in valid_inds]            
 
         # filter images too small and containing no annotations
         if not test_mode:

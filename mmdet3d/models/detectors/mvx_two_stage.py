@@ -63,8 +63,12 @@ class MVXTwoStageDetector(Base3DDetector):
 
         if img_backbone:
             self.img_backbone = builder.build_backbone(img_backbone)
+        else:
+            self.img_backbone = None
         if img_neck is not None:
             self.img_neck = builder.build_neck(img_neck)
+        else:
+            self.img_neck = None
         if img_rpn_head is not None:
             self.img_rpn_head = builder.build_head(img_rpn_head)
         if img_roi_head is not None:
