@@ -4,10 +4,18 @@ import argparse
 import copy
 import os
 import time
+import datetime
 import warnings
 from os import path as osp
 
-import mmcv
+for _ in range(10):
+    try:
+        import mmcv
+        break
+    except EOFError as e:
+        print ("ERROR: could not import mmcv. Attempt again. Error:")
+        print (e)
+        
 import torch
 import torch.distributed as dist
 from mmcv import Config, DictAction
@@ -168,7 +176,10 @@ def main():
         distributed = False
     else:
         distributed = True
-        init_dist(args.launcher, **cfg.dist_params)
+        dist_params = dict(cfg.dist_params)
+        if "timeout" in dist_params:
+            dist_params["timeout"] = datetime.timedelta(seconds=dist_params["timeout"])
+        init_dist(args.launcher, **dist_params)
         # re-set gpu_ids with distributed training mode
         _, world_size = get_dist_info()
         cfg.gpu_ids = range(world_size)
