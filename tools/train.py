@@ -7,6 +7,7 @@ import time
 import datetime
 import warnings
 from os import path as osp
+from pathlib import Path
 
 for _ in range(10):
     try:
@@ -97,6 +98,15 @@ def parse_args():
         'Note that the quotation marks are necessary and that no white space '
         'is allowed.')
     parser.add_argument(
+        '--overrides',
+        nargs='+',
+        help='override some settings in the used config, the key-value pair '
+        'in xxx=yyy format will be merged into config file. If the value to '
+        'be overwritten is a list, it should be like key="[a,b]" or key=a,b '
+        'It also allows nested list/tuple values, e.g. key="[(a,b),(c,d)]" '
+        'Note that the quotation marks are necessary and that no white space '
+        'is allowed.')
+    parser.add_argument(
         '--launcher',
         choices=['none', 'pytorch', 'slurm', 'mpi'],
         default='none',
@@ -121,12 +131,51 @@ def parse_args():
     return args
 
 
+def replace_list_with_tuple(config):
+    """Replace list with tuple recursively if the last list element is __astuple__."""
+    if isinstance(config, dict):
+        config = {k: replace_list_with_tuple(v) for k, v in config.items()}
+    elif isinstance(config, list):
+        config = [replace_list_with_tuple(v) for v in config]        
+        if len(config) > 0 and config[-1] == "__astuple__":
+            config = tuple(config[:-1])
+            
+    return config
+
+
 def main():
     args = parse_args()
 
-    cfg = Config.fromfile(args.config)
-    if args.cfg_options is not None:
-        cfg.merge_from_dict(args.cfg_options)
+    if os.path.splitext(args.config)[-1] == ".py":
+        ## Original python-based config
+        cfg = Config.fromfile(args.config)
+        if args.cfg_options is not None:
+            cfg.merge_from_dict(args.cfg_options)
+
+    else:
+        ### Hydra config system
+        import hydra
+        from omegaconf import OmegaConf
+        hydra.core.global_hydra.GlobalHydra.instance().clear()  # reinitialize hydra if already initialized
+        # Location of path with all hydra configs relative to this file
+        this_file_to_root = "../../"
+        config_root = "./implicit_3d_voxels/configs_hydra/"
+        config_name = os.path.relpath(args.config, config_root)
+
+        hydra.initialize(config_path=os.path.join(this_file_to_root, config_root), version_base='1.3.2')
+        OmegaConf.register_new_resolver("eval", eval)
+        overrides = args.overrides
+        cfg = hydra.compose(config_name=config_name, overrides=overrides)
+        cfg = hydra.utils.instantiate(cfg)  # Interpolate all variable references
+        cfg = OmegaConf.to_container(cfg)
+
+        # Annoyingly OmegaConf can only represent lists or dicts, but some of the mmcv library 
+        # distinguishes tuple from list. This is a hack to keep tuples in omegaconf. All lists
+        # whose last element equals to "__astuple__" will be converted to tuple.
+        cfg = replace_list_with_tuple(cfg)
+
+        # Convert to mmcv config.
+        cfg = Config(cfg)
 
     # set multi-process settings
     setup_multi_processes(cfg)
@@ -193,8 +242,8 @@ def main():
 
     # create work_dir
     mmcv.mkdir_or_exist(osp.abspath(cfg.work_dir))
-    # dump config
-    cfg.dump(osp.join(cfg.work_dir, osp.basename(args.config)))
+    # dump config in py format
+    cfg.dump(str(Path(cfg.work_dir) / Path(args.config).stem) + ".py")
     # init the logger before other steps
     timestamp = time.strftime('%Y%m%d_%H%M%S', time.localtime())
     log_file = osp.join(cfg.work_dir, f'{timestamp}.log')
@@ -232,7 +281,8 @@ def main():
     set_random_seed(seed, deterministic=args.deterministic)
     cfg.seed = seed
     meta['seed'] = seed
-    meta['exp_name'] = osp.basename(args.config)
+    # Filename without extension
+    meta['exp_name'] = str(Path(args.config).stem)
 
     model = build_model(
         cfg.model,
