@@ -1,5 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import argparse
+from datetime import timedelta
 import os
 import warnings
 
@@ -148,6 +149,13 @@ def main():
 
     cfg = compat_cfg(cfg)
 
+    # import "plugin" modules from custom paths, registry will be updated
+    if hasattr(cfg, 'plugin_dirs') and len(cfg.plugin_dirs) > 0:
+        import importlib
+        for plugin_dir in cfg.plugin_dirs:
+            print (f"import {plugin_dir}")
+            plg_lib = importlib.import_module(plugin_dir)
+
     # set multi-process settings
     setup_multi_processes(cfg)
 
@@ -171,6 +179,8 @@ def main():
         distributed = False
     else:
         distributed = True
+        if "timeout" in cfg.dist_params:
+            cfg.dist_params.timeout = timedelta(seconds=cfg.dist_params.timeout)
         init_dist(args.launcher, **cfg.dist_params)
 
     test_dataloader_default_args = dict(
