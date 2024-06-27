@@ -82,7 +82,8 @@ def single_gpu_test(model,
                         show=show,
                         out_file=out_file,
                         score_thr=show_score_thr)
-        results.extend(result)
+
+        results.extend(result.values() if isinstance(result, dict) else result)
 
         batch_size = len(result)
         for _ in range(batch_size):

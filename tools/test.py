@@ -37,7 +37,8 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description='MMDet test (and eval) a model')
     parser.add_argument('config', help='test config file path')
-    parser.add_argument('checkpoint', help='checkpoint file')
+    # cunjuny: hack to remove checkpoint requirement
+    parser.add_argument('--checkpoint', help='checkpoint file')
     parser.add_argument('--out', help='output result file in pickle format')
     parser.add_argument(
         '--fuse-conv-bn',
@@ -126,30 +127,78 @@ def parse_args():
         args.eval_options = args.options
     return args
 
+def replace_list_with_tuple(config):
+    """Replace list with tuple recursively if the last list element is __astuple__."""
+    if isinstance(config, dict):
+        config = {k: replace_list_with_tuple(v) for k, v in config.items()}
+    elif isinstance(config, list):
+        config = [replace_list_with_tuple(v) for v in config]        
+        if len(config) > 0 and config[-1] == "__astuple__":
+            config = tuple(config[:-1])
+            
+    return config
+
 
 def main():
     args = parse_args()
 
-    assert args.out or args.eval or args.format_only or args.show \
-        or args.show_dir, \
-        ('Please specify at least one operation (save/eval/format/show the '
-         'results / save the results) with the argument "--out", "--eval"'
-         ', "--format-only", "--show" or "--show-dir"')
+    # assert args.out or args.eval or args.format_only or args.show \
+    #     or args.show_dir, \
+    #     ('Please specify at least one operation (save/eval/format/show the '
+    #      'results / save the results) with the argument "--out", "--eval"'
+    #      ', "--format-only", "--show" or "--show-dir"')
 
-    if args.eval and args.format_only:
-        raise ValueError('--eval and --format_only cannot be both specified')
+    # if args.eval and args.format_only:
+    #     raise ValueError('--eval and --format_only cannot be both specified')
 
-    if args.out is not None and not args.out.endswith(('.pkl', '.pickle')):
-        raise ValueError('The output file must be a pkl file.')
+    # if args.out is not None and not args.out.endswith(('.pkl', '.pickle')):
+    #     raise ValueError('The output file must be a pkl file.')
 
-    cfg = Config.fromfile(args.config)
-    if args.cfg_options is not None:
-        cfg.merge_from_dict(args.cfg_options)
+    # cfg = Config.fromfile(args.config)
+    # if args.cfg_options is not None:
+    #     cfg.merge_from_dict(args.cfg_options)
 
-    cfg = compat_cfg(cfg)
+    # cfg = compat_cfg(cfg)
+
+    if os.path.splitext(args.config)[-1] == ".py":
+        ## Original python-based config
+        cfg = Config.fromfile(args.config)
+        if args.cfg_options is not None:
+            cfg.merge_from_dict(args.cfg_options)
+
+    else:
+        ### Hydra config system
+        import hydra
+        from omegaconf import OmegaConf
+        hydra.core.global_hydra.GlobalHydra.instance().clear()  # reinitialize hydra if already initialized
+        # Location of path with all hydra configs relative to this file
+        this_file_to_root = "../../"
+        config_root = "./implicit_3d_voxels/configs_hydra/"
+        config_name = os.path.relpath(args.config, config_root)
+
+        hydra.initialize(config_path=os.path.join(this_file_to_root, config_root), version_base='1.3.2')
+        OmegaConf.register_new_resolver("eval", eval)
+        # overrides = args.overrides
+        cfg = hydra.compose(config_name=config_name)#, overrides=overrides)
+        cfg = hydra.utils.instantiate(cfg)  # Interpolate all variable references
+        cfg = OmegaConf.to_container(cfg)
+
+        # Annoyingly OmegaConf can only represent lists or dicts, but some of the mmcv library 
+        # distinguishes tuple from list. This is a hack to keep tuples in omegaconf. All lists
+        # whose last element equals to "__astuple__" will be converted to tuple.
+        cfg = replace_list_with_tuple(cfg)
+
+        # Convert to mmcv config.
+        cfg = Config(cfg)
 
     # set multi-process settings
     setup_multi_processes(cfg)
+
+    if hasattr(cfg, 'plugin_dirs') and len(cfg.plugin_dirs) > 0:
+        import importlib
+        for plugin_dir in cfg.plugin_dirs:
+            print (f"import {plugin_dir}")
+            plg_lib = importlib.import_module(plugin_dir)
 
     # set cudnn_benchmark
     if cfg.get('cudnn_benchmark', False):
@@ -174,21 +223,21 @@ def main():
         init_dist(args.launcher, **cfg.dist_params)
 
     test_dataloader_default_args = dict(
-        samples_per_gpu=1, workers_per_gpu=2, dist=distributed, shuffle=False)
+        samples_per_gpu=1, workers_per_gpu=0, dist=distributed, shuffle=False)
 
     # in case the test dataset is concatenated
-    if isinstance(cfg.data.test, dict):
-        cfg.data.test.test_mode = True
-        if cfg.data.test_dataloader.get('samples_per_gpu', 1) > 1:
-            # Replace 'ImageToTensor' to 'DefaultFormatBundle'
-            cfg.data.test.pipeline = replace_ImageToTensor(
-                cfg.data.test.pipeline)
-    elif isinstance(cfg.data.test, list):
-        for ds_cfg in cfg.data.test:
-            ds_cfg.test_mode = True
-        if cfg.data.test_dataloader.get('samples_per_gpu', 1) > 1:
-            for ds_cfg in cfg.data.test:
-                ds_cfg.pipeline = replace_ImageToTensor(ds_cfg.pipeline)
+    # if isinstance(cfg.data.test, dict):
+    #     cfg.data.test.test_mode = True
+    #     if cfg.data.test_dataloader.get('samples_per_gpu', 1) > 1:
+    #         # Replace 'ImageToTensor' to 'DefaultFormatBundle'
+    #         cfg.data.test.pipeline = replace_ImageToTensor(
+    #             cfg.data.test.pipeline)
+    # elif isinstance(cfg.data.test, list):
+    #     for ds_cfg in cfg.data.test:
+    #         ds_cfg.test_mode = True
+    #     if cfg.data.test_dataloader.get('samples_per_gpu', 1) > 1:
+    #         for ds_cfg in cfg.data.test:
+    #             ds_cfg.pipeline = replace_ImageToTensor(ds_cfg.pipeline)
 
     test_loader_cfg = {
         **test_dataloader_default_args,
@@ -209,21 +258,24 @@ def main():
     fp16_cfg = cfg.get('fp16', None)
     if fp16_cfg is not None:
         wrap_fp16_model(model)
-    checkpoint = load_checkpoint(model, args.checkpoint, map_location='cpu')
-    if args.fuse_conv_bn:
-        model = fuse_conv_bn(model)
-    # old versions did not save class info in checkpoints, this walkaround is
-    # for backward compatibility
-    if 'CLASSES' in checkpoint.get('meta', {}):
-        model.CLASSES = checkpoint['meta']['CLASSES']
-    else:
-        model.CLASSES = dataset.CLASSES
-    # palette for visualization in segmentation tasks
-    if 'PALETTE' in checkpoint.get('meta', {}):
-        model.PALETTE = checkpoint['meta']['PALETTE']
-    elif hasattr(dataset, 'PALETTE'):
-        # segmentation dataset has `PALETTE` attribute
-        model.PALETTE = dataset.PALETTE
+    
+    # cunjuny: hack to remove checkpoint requirement
+    if args.checkpoint is not None:
+        checkpoint = load_checkpoint(model, args.checkpoint, map_location='cpu')
+        if args.fuse_conv_bn:
+            model = fuse_conv_bn(model)
+        # old versions did not save class info in checkpoints, this walkaround is
+        # for backward compatibility
+        if 'CLASSES' in checkpoint.get('meta', {}):
+            model.CLASSES = checkpoint['meta']['CLASSES']
+        else:
+            model.CLASSES = dataset.CLASSES
+        # palette for visualization in segmentation tasks
+        if 'PALETTE' in checkpoint.get('meta', {}):
+            model.PALETTE = checkpoint['meta']['PALETTE']
+        elif hasattr(dataset, 'PALETTE'):
+            # segmentation dataset has `PALETTE` attribute
+            model.PALETTE = dataset.PALETTE
 
     if not distributed:
         model = MMDataParallel(model, device_ids=cfg.gpu_ids)
@@ -235,7 +287,6 @@ def main():
             broadcast_buffers=False)
         outputs = multi_gpu_test(model, data_loader, args.tmpdir,
                                  args.gpu_collect)
-
     rank, _ = get_dist_info()
     if rank == 0:
         if args.out:
@@ -253,7 +304,13 @@ def main():
             ]:
                 eval_kwargs.pop(key, None)
             eval_kwargs.update(dict(metric=args.eval, **kwargs))
-            print(dataset.evaluate(outputs, **eval_kwargs))
+
+            if 'iou' in args.eval:
+                dataset.evaluate_occ_iou(outputs, None, occ_threshold=0.1)
+                
+            else:
+                # evaluate in the whole dataset for NDS
+                print(dataset.evaluate(outputs, **eval_kwargs))
 
 
 if __name__ == '__main__':
